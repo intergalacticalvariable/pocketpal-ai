@@ -244,6 +244,10 @@ dependencies {
     // OkHttp for DownloadModule (network requests)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // LiteRT-LM runs .litertlm models (Gemma 4 E2B/E4B). Releases after 0.16.1
+    // carry Kotlin 2.4 metadata, which this project's Kotlin 2.2 cannot read.
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.16.1")
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.16")
     testImplementation("androidx.test:core-ktx:1.7.0")
