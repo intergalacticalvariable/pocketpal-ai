@@ -72,6 +72,11 @@
         <uses-native-library
             android:name="libcdsprpc.so"
             android:required="false" />
+
+        <!-- Optional vendor library LiteRT-LM's GPU backend loads -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
     </application>
 
 </manifest>

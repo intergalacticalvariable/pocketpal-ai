@@ -158,4 +158,6 @@ export interface CompletionEngine {
     callback?: (data: CompletionStreamData) => void,
   ): Promise<CompletionResult>;
   stopCompletion(): Promise<void>;
+  /** Frees a native model the engine owns itself (not a llama.rn context). */
+  release?(): Promise<void>;
 }

@@ -17,9 +17,12 @@ import {
 import {fetchModelFilesDetails} from '../api/hf';
 import {profileFor} from '../api/servers';
 import {
+  LiteRTCompletionEngine,
   LocalCompletionEngine,
   OpenAICompletionEngine,
+  isLiteRTModelFile,
 } from '../api/completionEngines';
+import NativeLiteRTLM from '../specs/NativeLiteRTLM';
 
 import {uiStore, hfStore} from '.';
 import {serverStore} from './ServerStore';
@@ -55,6 +58,7 @@ import {classify, ClassifyPlatform} from '../services/deviceRules/classify';
 import {deriveUrl, parseDeviceRules} from '../services/deviceRules/parse';
 import {fetchRules} from '../services/deviceRules/rules';
 import {readDeviceSignals} from '../services/deviceRules/signals';
+import {liteRTPresetCandidates} from './liteRTPresets';
 import {
   DeviceRules,
   DeviceSignals,
@@ -912,17 +916,20 @@ class ModelStore {
   // result is origin:HF, identical to an HF-browser add. Multimodal candidates
   // also push their mmproj projector stub (mirrors addHFModel) so the projection
   // is resolvable for download. Deduped by model.id (author/repo/filename),
-  // first wins.
+  // first wins. `extraCandidates` (the LiteRT-LM presets the GGUF-only rules
+  // cannot carry) follow the tier's own.
   resolvePresetModels = (
     rules: DeviceRules,
     signals: DeviceSignals,
+    extraCandidates: RuleCandidate[] = [],
   ): Model[] => {
     const tier = classify(
       signals,
       rules.classifier,
       Platform.OS as ClassifyPlatform,
     );
-    const flat = rules.tiers[tier].models.flatMap(candidate => {
+    const candidates = [...rules.tiers[tier].models, ...extraCandidates];
+    const flat = candidates.flatMap(candidate => {
       const {hfModel, modelFile} = this.candidateToPair(candidate);
       const llm = hfAsModel(hfModel, modelFile);
       let named = candidate.displayName
@@ -977,7 +984,11 @@ class ModelStore {
         this.deviceTier = tier;
         this.rulesVersion = rules.rulesVersion;
       });
-      return this.resolvePresetModels(rules, signals);
+      return this.resolvePresetModels(
+        rules,
+        signals,
+        liteRTPresetCandidates(tier, Platform.OS),
+      );
     } catch (error) {
       console.warn('[ModelStore] preset resolution failed:', error);
       return [];
@@ -1004,7 +1015,13 @@ class ModelStore {
         this.deviceTier = tier;
         this.rulesVersion = fetched.rulesVersion;
       });
-      this.reconcilePresets(this.resolvePresetModels(fetched, signals));
+      this.reconcilePresets(
+        this.resolvePresetModels(
+          fetched,
+          signals,
+          liteRTPresetCandidates(tier, Platform.OS),
+        ),
+      );
     } catch (error) {
       console.warn('[ModelStore] fetched-rules upgrade failed:', error);
     }
@@ -1860,6 +1877,10 @@ class ModelStore {
    * Called after download completes to enable accurate memory estimation
    */
   fetchAndPersistGGUFMetadata = async (model: Model) => {
+    // A LiteRT-LM bundle is not GGUF; llama.rn cannot read it.
+    if (isLiteRTModelFile(model.filename)) {
+      return;
+    }
     try {
       const filePath = await this.getModelFullPath(model);
       if (!filePath) {
@@ -2201,7 +2222,8 @@ class ModelStore {
    *
    * @param model The main LLM model to initialize
    * @param mmProjPath Optional path to a projection model for multimodal support
-   * @returns The initialized LlamaContext, or null if cancelled/skipped
+   * @returns The initialized LlamaContext, or null if cancelled/skipped or
+   * the model runs on LiteRT-LM (which has no llama.rn context)
    */
   initContext = async (model: Model, mmProjPath?: string) => {
     // Benchmark mode owns the native context lifecycle end-to-end.
@@ -2228,11 +2250,21 @@ class ModelStore {
     });
 
     try {
-      // Resolve multimodal configuration
-      const {isMultimodalInit, resolvedMmProjPath, projectionModel} =
-        await this.resolveMultimodalConfig(model, mmProjPath);
+      // LiteRT-LM bundles run text-only, with no projection or draft model.
+      const isLiteRT = isLiteRTModelFile(model.filename);
 
-      const draftConfig = await this.resolveDraftConfig(model);
+      // Resolve multimodal configuration
+      const {isMultimodalInit, resolvedMmProjPath, projectionModel} = isLiteRT
+        ? {
+            isMultimodalInit: false,
+            resolvedMmProjPath: undefined,
+            projectionModel: undefined,
+          }
+        : await this.resolveMultimodalConfig(model, mmProjPath);
+
+      const draftConfig: DraftConfig = isLiteRT
+        ? {mode: 'off'}
+        : await this.resolveDraftConfig(model);
 
       // Check memory and get user confirmation if needed (no mutex - UI interaction)
       const shouldProceed = await this.checkMemoryAndConfirm(
@@ -2278,6 +2310,13 @@ class ModelStore {
         }
 
         // Skip if already loaded
+        if (
+          this.activeModelId === model.id &&
+          isLiteRT &&
+          this.engine instanceof LiteRTCompletionEngine
+        ) {
+          return null;
+        }
         if (this.activeModelId === model.id && this.context) {
           console.log(
             `[ModelStore] Model "${model.name}" is already loaded, skipping`,
@@ -2290,6 +2329,11 @@ class ModelStore {
 
         // Small delay for native cleanup before loading next model
         await new Promise(resolve => setTimeout(resolve, 100));
+
+        if (isLiteRT) {
+          await this.proceedWithLiteRTInitialization(model);
+          return null;
+        }
 
         // Proceed with actual initialization
         return this.proceedWithInitialization(
@@ -2314,6 +2358,63 @@ class ModelStore {
       });
     }
   };
+
+  /**
+   * Load a `.litertlm` bundle on the LiteRT-LM native module. It owns its
+   * model, so there is no llama.rn context: only the engine is set.
+   */
+  private async proceedWithLiteRTInitialization(model: Model): Promise<void> {
+    try {
+      if (!NativeLiteRTLM) {
+        throw new Error(
+          'LiteRT-LM models (.litertlm) are currently supported on Android only',
+        );
+      }
+      const filePath = await this.getModelFullPath(model);
+      if (!filePath) {
+        throw new Error('Model path is undefined');
+      }
+      runInAction(() => {
+        this.isMultimodalActive = false;
+        this.activeProjectionModelId = undefined;
+      });
+
+      const useGpu = !this.contextInitParams.no_gpu_devices;
+      const t0 = Date.now();
+      const {contextId, backend} = await NativeLiteRTLM.loadModel(filePath, {
+        backend: useGpu ? 'gpu' : 'cpu',
+        maxNumTokens: this.contextInitParams.n_ctx,
+        threadCount: this.contextInitParams.n_threads,
+      });
+      console.log(
+        `[ModelStore] LiteRT-LM loaded on ${backend} in ${Date.now() - t0}ms`,
+      );
+
+      runInAction(() => {
+        this.engine = new LiteRTCompletionEngine(contextId);
+        this.activeRemoteBinding = undefined;
+        this.activeContextSettings = undefined;
+        this.loadedModelBytes = model.size || undefined;
+        this.setActiveModel(model.id);
+        this.pendingModelId = null;
+      });
+    } catch (error) {
+      console.error(
+        `Failed to initialize LiteRT-LM model "${model.name}" (${model.id}):`,
+        error,
+      );
+      const errorState = createErrorState(error, 'modelInit', undefined, {
+        modelId: model.id,
+        modelName: model.name,
+        modelUrl: model.hfUrl,
+        modelSize: model.size,
+      });
+      runInAction(() => {
+        this.modelLoadError = errorState;
+      });
+      throw error;
+    }
+  }
 
   /**
    * Proceed with the actual model initialization after device capability checks
@@ -2507,9 +2608,16 @@ class ModelStore {
           } catch {
             // Ignore errors from stopping remote completion
           }
+          // An engine that owns a native model (LiteRT-LM) frees it here.
+          try {
+            await this.engine.release?.();
+          } catch (error) {
+            console.error('Error releasing engine:', error);
+          }
         }
         runInAction(() => {
           this.engine = undefined;
+          this.loadedModelBytes = undefined;
           this.activeRemoteBinding = undefined;
           if (clearActiveModel) {
             this.activeModelId = undefined;
@@ -2668,6 +2776,9 @@ class ModelStore {
   get contextId(): string | undefined {
     if (this.context) {
       return String(this.context.id);
+    }
+    if (this.engine instanceof LiteRTCompletionEngine) {
+      return `litert-${this.engine.contextId}`;
     }
     const model = this.activeModel;
     if (model?.origin === ModelOrigin.REMOTE && model.serverId) {
