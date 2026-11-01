@@ -58,6 +58,7 @@ import {classify, ClassifyPlatform} from '../services/deviceRules/classify';
 import {deriveUrl, parseDeviceRules} from '../services/deviceRules/parse';
 import {fetchRules} from '../services/deviceRules/rules';
 import {readDeviceSignals} from '../services/deviceRules/signals';
+import {liteRTPresetCandidates} from './liteRTPresets';
 import {
   DeviceRules,
   DeviceSignals,
@@ -915,17 +916,20 @@ class ModelStore {
   // result is origin:HF, identical to an HF-browser add. Multimodal candidates
   // also push their mmproj projector stub (mirrors addHFModel) so the projection
   // is resolvable for download. Deduped by model.id (author/repo/filename),
-  // first wins.
+  // first wins. `extraCandidates` (the LiteRT-LM presets the GGUF-only rules
+  // cannot carry) follow the tier's own.
   resolvePresetModels = (
     rules: DeviceRules,
     signals: DeviceSignals,
+    extraCandidates: RuleCandidate[] = [],
   ): Model[] => {
     const tier = classify(
       signals,
       rules.classifier,
       Platform.OS as ClassifyPlatform,
     );
-    const flat = rules.tiers[tier].models.flatMap(candidate => {
+    const candidates = [...rules.tiers[tier].models, ...extraCandidates];
+    const flat = candidates.flatMap(candidate => {
       const {hfModel, modelFile} = this.candidateToPair(candidate);
       const llm = hfAsModel(hfModel, modelFile);
       let named = candidate.displayName
@@ -980,7 +984,11 @@ class ModelStore {
         this.deviceTier = tier;
         this.rulesVersion = rules.rulesVersion;
       });
-      return this.resolvePresetModels(rules, signals);
+      return this.resolvePresetModels(
+        rules,
+        signals,
+        liteRTPresetCandidates(tier, Platform.OS),
+      );
     } catch (error) {
       console.warn('[ModelStore] preset resolution failed:', error);
       return [];
@@ -1007,7 +1015,13 @@ class ModelStore {
         this.deviceTier = tier;
         this.rulesVersion = fetched.rulesVersion;
       });
-      this.reconcilePresets(this.resolvePresetModels(fetched, signals));
+      this.reconcilePresets(
+        this.resolvePresetModels(
+          fetched,
+          signals,
+          liteRTPresetCandidates(tier, Platform.OS),
+        ),
+      );
     } catch (error) {
       console.warn('[ModelStore] fetched-rules upgrade failed:', error);
     }

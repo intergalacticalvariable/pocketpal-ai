@@ -1,10 +1,13 @@
 jest.unmock('../../store');
 import {runInAction} from 'mobx';
 import {initLlama} from 'llama.rn';
+import {Platform} from 'react-native';
 
 import {Model, ModelOrigin} from '../../utils/types';
 import {createModel} from '../../../jest/fixtures/models';
 import {LiteRTCompletionEngine} from '../../api/completionEngines';
+import type {Tier} from '../../services/deviceRules/types';
+import {liteRTPresetCandidates} from '../liteRTPresets';
 
 import {modelStore} from '..';
 
@@ -101,5 +104,61 @@ describe('ModelStore with a LiteRT-LM model', () => {
     );
     expect(modelStore.modelLoadError).toBeDefined();
     expect(modelStore.engine).toBeUndefined();
+  });
+});
+
+describe('LiteRT-LM presets', () => {
+  it('offers Gemma 4 E2B from the mid tier and E4B from the high tier, Android only', () => {
+    const names = (tier: Tier, os: string) =>
+      liteRTPresetCandidates(tier, os).map(c => c.hfFilename);
+
+    expect(names('low', 'android')).toEqual([]);
+    expect(names('mid', 'android')).toEqual(['gemma-4-E2B-it.litertlm']);
+    expect(names('high', 'android')).toEqual([
+      'gemma-4-E2B-it.litertlm',
+      'gemma-4-E4B-it.litertlm',
+    ]);
+    expect(names('flagship', 'ios')).toEqual([]);
+  });
+
+  it('materializes them as downloadable Hugging Face presets', () => {
+    const savedOS = Platform.OS;
+    Platform.OS = 'android';
+    try {
+      const rules = {
+        schemaVersion: '2.0.0',
+        platform: 'android',
+        rulesVersion: 'test',
+        classifier: {
+          ramBands: [{id: 'all', maxBytes: null}],
+          tierMatrix: [{ramBand: 'all', socClass: 'mid', tier: 'mid'}],
+          socModelToClass: {'Tensor G3': 'mid'},
+        },
+        tiers: {
+          low: {models: []},
+          mid: {models: []},
+          high: {models: []},
+          flagship: {models: []},
+        },
+      };
+      const [e2b] = modelStore.resolvePresetModels(
+        rules as any,
+        {ramBytes: 8e9, socModel: 'Tensor G3'} as any,
+        liteRTPresetCandidates('mid', 'android'),
+      );
+
+      expect(e2b).toMatchObject({
+        id: 'litert-community/gemma-4-E2B-it-litert-lm/gemma-4-E2B-it.litertlm',
+        name: 'Gemma 4 E2B (LiteRT-LM)',
+        origin: ModelOrigin.HF,
+        size: 2588147712,
+        isRulePreset: true,
+        downloadUrl:
+          'https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm',
+      });
+      expect(e2b.supportsMultimodal).toBeFalsy();
+    } finally {
+      Platform.OS = savedOS;
+    }
   });
 });
