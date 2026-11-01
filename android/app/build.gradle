@@ -10,6 +10,16 @@ apply plugin: "com.google.gms.google-services"
 
 apply from: "../../node_modules/react-native-config/android/dotenv.gradle"
 
+// LiteRT-LM ships Java 21 bytecode, which kapt's javac cannot read on the
+// JDK 17 toolchain React Native assigns every module. Compile this module on
+// JDK 21 while still emitting Java 17 bytecode, as before.
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
 /**
  * This is the configuration block to customize your React Native Android app.
  * By default you don't need to apply any configuration, just uncomment the lines you need.
